@@ -21,6 +21,7 @@ async function main() {
 
   const appAddress = algosdk.getApplicationAddress(appId)
   const sp = await getSuggestedParams(algod)
+
   const optInMethod = new algosdk.ABIMethod({
     name: 'opt_in_asset',
     args: [{ type: 'uint64', name: 'assetId' }],

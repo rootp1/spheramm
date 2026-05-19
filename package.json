@@ -15,6 +15,8 @@
     "create:asas": "npm run create:asas -w scripts",
     "init:pool": "npm run init:pool -w scripts",
     "swap:test": "npm run swap:test -w scripts",
+    "lp:test": "npm run lp:test -w scripts",
+    "fee-growth:test": "npm run fee-growth:test -w scripts",
     "validate:e2e": "npm run validate:e2e -w scripts",
     "dev:frontend": "npm run dev -w frontend"
   }

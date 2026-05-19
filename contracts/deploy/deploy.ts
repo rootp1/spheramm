@@ -32,10 +32,11 @@ async function main() {
     approvalProgram: new Uint8Array(Buffer.from(approvalCompiled.result, 'base64')),
     clearProgram: new Uint8Array(Buffer.from(clearCompiled.result, 'base64')),
     appArgs: [createMethod.getSelector()],
-    numGlobalInts: 9,
+    numGlobalInts: 11,
     numGlobalByteSlices: 1,
-    numLocalInts: 0,
+    numLocalInts: 1,
     numLocalByteSlices: 0,
+    extraPages: 1,
     suggestedParams,
     onComplete: algosdk.OnApplicationComplete.NoOpOC,
   })

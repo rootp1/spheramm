@@ -25,12 +25,24 @@ Global state:
 - `feeBps`
 - `admin`
 - `paused`
+- `totalLpSupply`
+- `lpAssetId` (reserved for future ASA LP-token mode)
+- `totalLiquidity` (mirrors LP supply for backward compatibility)
+
+Local state:
+- `lpBalance` (per-account LP ownership)
 
 Methods:
 - `create_pool(assetA, assetB, assetC, amountA, amountB, amountC, feeBps)`
 - `quote_swap_exact_in(assetInId, amountIn) -> amountOut`
 - `swap_exact_in(assetInId, amountIn, minAmountOut) -> amountOut`
 - `get_pool_state()`
+- `add_liquidity(amountA, amountB, amountC, minLpOut) -> lpOut`
+- `remove_liquidity(lpAmount, minAOut, minBOut, minCOut) -> (amountAOut, amountBOut, amountCOut)`
+- `quote_add_liquidity(amountA, amountB, amountC) -> (lpOut, lpRaw, penaltyBps, imbalanceBps)`
+- `quote_remove_liquidity(lpAmount) -> (amountAOut, amountBOut, amountCOut)`
+- `get_lp_state() -> (totalLpSupply, userLpBalance, geometricL, poolImbalanceBps)`
+- `get_pool_value() -> geometricL`
 - `pause()` / `unpause()`
 
 Swap validation for `swap_exact_in`:
@@ -97,7 +109,37 @@ Limitations (intentional MVP scope):
 
 - Integer-only (uint64) math with floor rounding
 - No ticks, concentrated ranges, or dynamic curvature controls
-- Dynamic imbalance fee (0.3% to 1.0%) and no LP share accounting yet
+- Dynamic imbalance fee (0.3% to 1.0%)
+- First-pass LP accounting (not concentrated-liquidity / no range positions)
+
+## LP Economics Design
+
+Why swaps-first:
+- MVP started by validating the orbital-inspired 3-reserve swap engine and AVM-safe integer math.
+- LP economics were added as a second layer so swap behavior and invariant safety stayed stable.
+
+LP ownership:
+- LP shares are explicit and on-chain: `totalLpSupply` + per-user `lpBalance` in app local state.
+- Initial pool creator receives initial LP supply equal to initial seeded liquidity baseline.
+
+Deposit minting:
+- Pool value metric uses geometric liquidity: `L = floor(sqrt(A^2 + B^2 + C^2))`.
+- Deposit quote uses the same geometric metric for consistent integer-only behavior.
+- Base mint: `lpRaw = floor(depositL * totalLpSupply / poolL)`.
+- Mild imbalance adjustment reduces minted LP for highly one-sided deposits.
+
+Withdrawal burning:
+- Burned LP removes proportional reserves:
+- `amountOutX = floor(reserveX * lpBurn / totalLpSupply)` for X in A/B/C.
+- Accounting updates LP supply and reserves atomically.
+
+Fee accrual:
+- Swap fees stay in reserves (no external fee vault).
+- As reserves grow from fees, `L/LP` (value per share) rises naturally over time.
+
+What is exact vs approximate:
+- Exact on-chain: reserve updates, LP mint/burn, swap execution, and proportional withdrawals.
+- Approximate UX: frontend quote previews and geometric display are deterministic approximations of on-chain outcomes, with slippage protection in transactions.
 
 ## Prerequisites
 
@@ -195,6 +237,20 @@ This performs atomic group:
 - Txn1: app call `swap_exact_in` with `foreignAssets=[B]`
 
 Then prints updated reserves.
+
+### 7) LP and fee-growth tests
+
+```bash
+npm run lp:test
+npm run fee-growth:test
+```
+
+These log:
+- reserves before/after
+- LP supply before/after
+- geometric liquidity metric
+- deposit/withdraw outcomes
+- value-per-LP growth signal after swaps
 
 ## Demo Flow Checklist
 

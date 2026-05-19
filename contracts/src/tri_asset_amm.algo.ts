@@ -5,6 +5,7 @@ import {
   Contract,
   Global,
   GlobalState,
+  LocalState,
   gtxn,
   itxn,
   op,
@@ -24,6 +25,9 @@ export class TriAssetAmm extends Contract {
   admin = GlobalState<Account>()
   paused = GlobalState<boolean>()
   totalLiquidity = GlobalState<uint64>()
+  totalLpSupply = GlobalState<uint64>()
+  lpAssetId = GlobalState<uint64>()
+  lpBalance = LocalState<uint64>()
 
   public createApplication(): void {
     this.assetAId.value = 0
@@ -38,6 +42,8 @@ export class TriAssetAmm extends Contract {
     this.admin.value = Txn.sender
     this.paused.value = false
     this.totalLiquidity.value = 0
+    this.totalLpSupply.value = 0
+    this.lpAssetId.value = 0
   }
 
   public create_pool(
@@ -88,6 +94,112 @@ export class TriAssetAmm extends Contract {
     const liqTotal: uint64 = liqPartial + amountC
     assert(liqTotal >= liqPartial, 'liquidity overflow')
     this.totalLiquidity.value = liqTotal
+    this.totalLpSupply.value = liqTotal
+  }
+
+  public add_liquidity(amountA: uint64, amountB: uint64, amountC: uint64, minLpOut: uint64): uint64 {
+    assert(this.assetAId.value > 0, 'pool not initialized')
+    assert(!this.paused.value, 'pool paused')
+    assert(amountA > 0 && amountB > 0 && amountC > 0, 'invalid deposit amounts')
+    assert(Global.groupSize === 4, 'group size must be 4')
+
+    const txA = gtxn.AssetTransferTxn(0)
+    const txB = gtxn.AssetTransferTxn(1)
+    const txC = gtxn.AssetTransferTxn(2)
+
+    assert(txA.sender === Txn.sender && txB.sender === Txn.sender && txC.sender === Txn.sender, 'sender mismatch')
+    assert(txA.assetReceiver === Global.currentApplicationAddress, 'a receiver invalid')
+    assert(txB.assetReceiver === Global.currentApplicationAddress, 'b receiver invalid')
+    assert(txC.assetReceiver === Global.currentApplicationAddress, 'c receiver invalid')
+    assert(txA.xferAsset.id === this.assetAId.value && txA.assetAmount === amountA, 'asset A mismatch')
+    assert(txB.xferAsset.id === this.assetBId.value && txB.assetAmount === amountB, 'asset B mismatch')
+    assert(txC.xferAsset.id === this.assetCId.value && txC.assetAmount === amountC, 'asset C mismatch')
+
+    const [lpOut] = this.quote_add_liquidity(amountA, amountB, amountC)
+    assert(lpOut >= minLpOut, 'lp slippage exceeded')
+    assert(lpOut > 0, 'lpOut zero')
+
+    this.reserveA.value = this.reserveA.value + amountA
+    this.reserveB.value = this.reserveB.value + amountB
+    this.reserveC.value = this.reserveC.value + amountC
+    assert(this.reserveA.value <= 100_000_000 && this.reserveB.value <= 100_000_000 && this.reserveC.value <= 100_000_000, 'reserve cap exceeded')
+
+    this.totalLpSupply.value = this.totalLpSupply.value + lpOut
+    this.totalLiquidity.value = this.totalLpSupply.value
+    this.lpBalance(Txn.sender).value = this.lpBalance(Txn.sender).value + lpOut
+    return lpOut
+  }
+
+  public remove_liquidity(lpAmount: uint64, minAOut: uint64, minBOut: uint64, minCOut: uint64): [uint64, uint64, uint64] {
+    assert(this.assetAId.value > 0, 'pool not initialized')
+    assert(!this.paused.value, 'pool paused')
+    assert(lpAmount > 0, 'lp amount must be positive')
+    assert(this.totalLpSupply.value > 0, 'no LP supply')
+
+    const userLp = this.lpBalance(Txn.sender).value
+    assert(userLp >= lpAmount, 'insufficient LP balance')
+
+    const [amountAOut, amountBOut, amountCOut] = this.quote_remove_liquidity(lpAmount)
+    assert(amountAOut >= minAOut && amountBOut >= minBOut && amountCOut >= minCOut, 'withdraw slippage exceeded')
+    assert(amountAOut > 0 && amountBOut > 0 && amountCOut > 0, 'withdraw amounts zero')
+
+    const newReserveA = this.safeSub(this.reserveA.value, amountAOut)
+    const newReserveB = this.safeSub(this.reserveB.value, amountBOut)
+    const newReserveC = this.safeSub(this.reserveC.value, amountCOut)
+    const kAfter = this.invariant(newReserveA, newReserveB, newReserveC)
+    this.validatePoolHealth(newReserveA, newReserveB, newReserveC, kAfter)
+
+    this.reserveA.value = newReserveA
+    this.reserveB.value = newReserveB
+    this.reserveC.value = newReserveC
+
+    this.totalLpSupply.value = this.safeSub(this.totalLpSupply.value, lpAmount)
+    this.totalLiquidity.value = this.totalLpSupply.value
+    this.lpBalance(Txn.sender).value = this.safeSub(this.lpBalance(Txn.sender).value, lpAmount)
+
+    itxn.assetTransfer({ xferAsset: this.assetAId.value, assetReceiver: Txn.sender, assetAmount: amountAOut, fee: 0 }).submit()
+    itxn.assetTransfer({ xferAsset: this.assetBId.value, assetReceiver: Txn.sender, assetAmount: amountBOut, fee: 0 }).submit()
+    itxn.assetTransfer({ xferAsset: this.assetCId.value, assetReceiver: Txn.sender, assetAmount: amountCOut, fee: 0 }).submit()
+
+    return [amountAOut, amountBOut, amountCOut]
+  }
+
+  public get_lp_state(): [uint64, uint64, uint64, uint64] {
+    return [this.totalLpSupply.value, this.lpBalance(Txn.sender).value, this.geometricLiquidity(this.reserveA.value, this.reserveB.value, this.reserveC.value), this.imbalanceBps(this.reserveA.value, this.reserveB.value, this.reserveC.value)]
+  }
+
+  public get_pool_value(): uint64 {
+    return this.geometricLiquidity(this.reserveA.value, this.reserveB.value, this.reserveC.value)
+  }
+
+  public quote_add_liquidity(amountA: uint64, amountB: uint64, amountC: uint64): [uint64, uint64, uint64, uint64] {
+    assert(amountA > 0 && amountB > 0 && amountC > 0, 'invalid deposit amounts')
+    const poolValue = this.geometricLiquidity(this.reserveA.value, this.reserveB.value, this.reserveC.value)
+    const depositValue = this.geometricLiquidity(amountA, amountB, amountC)
+    assert(poolValue > 0 && depositValue > 0, 'invalid liquidity values')
+
+    let lpRaw: uint64 = 0
+    if (this.totalLpSupply.value === 0) {
+      lpRaw = depositValue
+    } else {
+      lpRaw = (depositValue * this.totalLpSupply.value) / poolValue
+    }
+    assert(lpRaw > 0, 'lpRaw zero')
+
+    const depositImbalance = this.imbalanceBps(amountA, amountB, amountC)
+    const penaltyBps = this.computeDepositPenaltyBps(depositImbalance)
+    const lpOut: uint64 = (lpRaw * (10_000 - penaltyBps)) / 10_000
+    assert(lpOut > 0, 'lpOut zero')
+    return [lpOut, lpRaw, penaltyBps, depositImbalance]
+  }
+
+  public quote_remove_liquidity(lpAmount: uint64): [uint64, uint64, uint64] {
+    assert(this.totalLpSupply.value > 0, 'no LP supply')
+    assert(lpAmount > 0 && lpAmount <= this.totalLpSupply.value, 'invalid lpAmount')
+    const amountAOut: uint64 = (this.reserveA.value * lpAmount) / this.totalLpSupply.value
+    const amountBOut: uint64 = (this.reserveB.value * lpAmount) / this.totalLpSupply.value
+    const amountCOut: uint64 = (this.reserveC.value * lpAmount) / this.totalLpSupply.value
+    return [amountAOut, amountBOut, amountCOut]
   }
 
   public quote_swap_exact_in(assetInId: uint64, amountIn: uint64): uint64 {
@@ -263,6 +375,11 @@ export class TriAssetAmm extends Contract {
     return sumABC
   }
 
+  private geometricLiquidity(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
+    const k = this.invariant(reserveA, reserveB, reserveC)
+    return this.safeSqrt(k)
+  }
+
   private safeSquare(value: uint64): uint64 {
     assert(value <= 4_000_000_000, 'square bound exceeded')
     const squared: uint64 = value * value
@@ -295,11 +412,27 @@ export class TriAssetAmm extends Contract {
     assert(dominanceBps <= 6_400, 'dominance threshold exceeded')
   }
 
+  private imbalanceBps(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
+    const sum: uint64 = reserveA + reserveB + reserveC
+    assert(sum > 0, 'sum zero')
+    let maxReserve = reserveA
+    if (reserveB > maxReserve) maxReserve = reserveB
+    if (reserveC > maxReserve) maxReserve = reserveC
+    return (maxReserve * 10_000) / sum
+  }
+
+  private computeDepositPenaltyBps(depositImbalanceBps: uint64): uint64 {
+    if (depositImbalanceBps <= 3_600) return 0
+    if (depositImbalanceBps <= 4_800) return (depositImbalanceBps - 3_600) / 12
+    if (depositImbalanceBps >= 7_500) return 650
+    return 100 + ((depositImbalanceBps - 4_800) * 550) / 2_700
+  }
+
   private computeDynamicFee(reserveA: uint64, reserveB: uint64, reserveC: uint64, kValue: uint64): uint64 {
     const dominanceBps = this.computeDominanceBps(reserveA, reserveB, reserveC, kValue)
     if (dominanceBps <= 3_400) return 30
     if (dominanceBps >= 6_400) return 100
-    const excess = dominanceBps - 3_400
+    const excess: uint64 = dominanceBps - 3_400
     return 30 + (excess * 70) / 3_000
   }
 
@@ -313,13 +446,13 @@ export class TriAssetAmm extends Contract {
     assert(reserveThird > 1, 'third reserve too small')
     const denom: uint64 = reserveIn * 20
     assert(denom > reserveIn, 'denominator overflow')
-    let base = (reserveThird * amountInAfterFee) / denom
+    let base: uint64 = (reserveThird * amountInAfterFee) / denom
     if (base === 0) base = 1
 
-    let weighted = (base * (10_000 + dominanceBps)) / 10_000
+    let weighted: uint64 = (base * (10_000 + dominanceBps)) / 10_000
     if (weighted === 0) weighted = 1
 
-    const maxAdjust = reserveThird - 1
+    const maxAdjust: uint64 = reserveThird - 1
     if (weighted > maxAdjust) return maxAdjust
     return weighted
   }

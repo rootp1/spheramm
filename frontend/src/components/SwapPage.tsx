@@ -2,6 +2,7 @@
 
 import { useWallet, Wallet, WalletId } from '@txnlab/use-wallet-react'
 import algosdk from 'algosdk'
+import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 import { algod, appId, assets, encodeU64, getAppAddress } from '../lib/algorand'
 
@@ -10,6 +11,7 @@ type PoolState = {
   reserveB: number
   reserveC: number
   feeBps: number
+  totalLpSupply: number
 }
 
 function pickReserve(pool: PoolState, assetId: number) {
@@ -126,7 +128,7 @@ export default function SwapPage() {
     signTransactions,
   } = useWallet()
 
-  const [pool, setPool] = useState<PoolState>({ reserveA: 0, reserveB: 0, reserveC: 0, feeBps: 30 })
+  const [pool, setPool] = useState<PoolState>({ reserveA: 0, reserveB: 0, reserveC: 0, feeBps: 30, totalLpSupply: 0 })
   const [assetInId, setAssetInId] = useState<number>(assets[0].id)
   const [assetOutId, setAssetOutId] = useState<number>(assets[1].id)
   const [amountIn, setAmountIn] = useState<number>(10)
@@ -139,6 +141,11 @@ export default function SwapPage() {
   const [mounted, setMounted] = useState(false)
   const [fundAmount, setFundAmount] = useState<number>(10)
   const [fundingAssetId, setFundingAssetId] = useState<number | null>(null)
+  const [lpBalance, setLpBalance] = useState<number>(0)
+  const [addA, setAddA] = useState<number>(10)
+  const [addB, setAddB] = useState<number>(10)
+  const [addC, setAddC] = useState<number>(10)
+  const [removeLp, setRemoveLp] = useState<number>(10)
 
   const preferredWalletOrder = [WalletId.LUTE, WalletId.PERA, WalletId.DEFLY, WalletId.EXODUS]
 
@@ -174,6 +181,7 @@ export default function SwapPage() {
   const priceImpactPct = spotPrice > 0 ? Math.max(0, ((spotPrice - executionPrice) / spotPrice) * 100) : 0
   const allSq = useMemo(() => [pool.reserveA * pool.reserveA, pool.reserveB * pool.reserveB, pool.reserveC * pool.reserveC], [pool])
   const invariantNow = useMemo(() => allSq[0] + allSq[1] + allSq[2], [allSq])
+  const geometricL = useMemo(() => Math.floor(Math.sqrt(invariantNow)), [invariantNow])
   const dominanceNowBps = useMemo(() => (invariantNow > 0 ? Math.floor((Math.max(allSq[0], allSq[1], allSq[2]) * 10000) / invariantNow) : 0), [allSq, invariantNow])
   const isImbalanced = dominanceNowBps >= 5800
   const missingOptIns = useMemo(
@@ -181,6 +189,31 @@ export default function SwapPage() {
     [configuredAssets, optedAssetIds],
   )
   const inputAssetBalance = walletAssetBalances[assetInId] ?? 0
+  const addImbalanceBps = useMemo(() => {
+    const total = addA + addB + addC
+    if (total <= 0) return 0
+    return Math.floor((Math.max(addA, addB, addC) * 10000) / total)
+  }, [addA, addB, addC])
+  const addPenaltyBps = useMemo(() => {
+    if (addImbalanceBps <= 3600) return 0
+    if (addImbalanceBps <= 4800) return Math.floor((addImbalanceBps - 3600) / 12)
+    if (addImbalanceBps >= 7500) return 650
+    return 100 + Math.floor(((addImbalanceBps - 4800) * 550) / 2700)
+  }, [addImbalanceBps])
+  const addLpEstimate = useMemo(() => {
+    const depositL = Math.floor(Math.sqrt(addA * addA + addB * addB + addC * addC))
+    if (depositL <= 0 || geometricL <= 0) return 0
+    const lpRaw = pool.totalLpSupply <= 0 ? depositL : Math.floor((depositL * pool.totalLpSupply) / geometricL)
+    return Math.floor((lpRaw * (10000 - addPenaltyBps)) / 10000)
+  }, [addA, addB, addC, geometricL, pool.totalLpSupply, addPenaltyBps])
+  const removeQuote = useMemo(() => {
+    if (pool.totalLpSupply <= 0 || removeLp <= 0) return { a: 0, b: 0, c: 0 }
+    return {
+      a: Math.floor((pool.reserveA * removeLp) / pool.totalLpSupply),
+      b: Math.floor((pool.reserveB * removeLp) / pool.totalLpSupply),
+      c: Math.floor((pool.reserveC * removeLp) / pool.totalLpSupply),
+    }
+  }, [pool, removeLp])
 
   async function loadPool() {
     if (!appId) return
@@ -194,7 +227,20 @@ export default function SwapPage() {
       reserveB: byKey('reserveB'),
       reserveC: byKey('reserveC'),
       feeBps: byKey('feeBps') || 30,
+      totalLpSupply: byKey('totalLpSupply'),
     })
+  }
+
+  async function loadLpBalance() {
+    if (!activeAddress || !appId) {
+      setLpBalance(0)
+      return
+    }
+    const accountInfo = await algod.accountApplicationInformation(activeAddress, appId).do().catch(() => null)
+    const kv = accountInfo?.appLocalState?.keyValue ?? []
+    const byKey = (key: string) =>
+      Number(kv.find((x: any) => Buffer.from(x.key, 'base64').toString('utf8') === key)?.value?.uint ?? 0)
+    setLpBalance(byKey('lpBalance'))
   }
 
   async function loadWalletAssetOptIns() {
@@ -371,6 +417,77 @@ export default function SwapPage() {
     await loadPool()
   }
 
+  async function addLiquidity() {
+    if (!activeAddress) throw new Error('Connect wallet first')
+    if (addA <= 0 || addB <= 0 || addC <= 0) throw new Error('Enter valid liquidity amounts')
+    const appAddress = getAppAddress()
+    const sp = await algod.getTransactionParams().do()
+    const method = new algosdk.ABIMethod({
+      name: 'add_liquidity',
+      args: [
+        { type: 'uint64', name: 'amountA' },
+        { type: 'uint64', name: 'amountB' },
+        { type: 'uint64', name: 'amountC' },
+        { type: 'uint64', name: 'minLpOut' },
+      ],
+      returns: { type: 'uint64' },
+    })
+    const txA = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({ sender: activeAddress, receiver: appAddress, amount: addA, assetIndex: assets[0].id, suggestedParams: sp })
+    const txB = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({ sender: activeAddress, receiver: appAddress, amount: addB, assetIndex: assets[1].id, suggestedParams: sp })
+    const txC = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({ sender: activeAddress, receiver: appAddress, amount: addC, assetIndex: assets[2].id, suggestedParams: sp })
+    const appCall = algosdk.makeApplicationNoOpTxnFromObject({
+      sender: activeAddress,
+      appIndex: BigInt(appId),
+      appArgs: [method.getSelector(), encodeU64(addA), encodeU64(addB), encodeU64(addC), encodeU64(Math.floor(addLpEstimate * 0.98))],
+      suggestedParams: sp,
+    })
+    algosdk.assignGroupID([txA, txB, txC, appCall])
+    const signed = await signTransactions([txA, txB, txC, appCall].map((txn) => algosdk.encodeUnsignedTransaction(txn)))
+    const signedGroup = signed.filter((stxn): stxn is Uint8Array => stxn !== null)
+    const { txid } = await algod.sendRawTransaction(signedGroup).do()
+    await algosdk.waitForConfirmation(algod, txid, 4)
+    setStatus(`Add liquidity confirmed: ${txid}`)
+    await loadPool()
+    await loadLpBalance()
+  }
+
+  async function removeLiquidity() {
+    if (!activeAddress) throw new Error('Connect wallet first')
+    if (removeLp <= 0) throw new Error('Enter LP to burn')
+    if (removeLp > lpBalance) throw new Error('LP burn exceeds your balance')
+    const sp = await algod.getTransactionParams().do()
+    const method = new algosdk.ABIMethod({
+      name: 'remove_liquidity',
+      args: [
+        { type: 'uint64', name: 'lpAmount' },
+        { type: 'uint64', name: 'minAOut' },
+        { type: 'uint64', name: 'minBOut' },
+        { type: 'uint64', name: 'minCOut' },
+      ],
+      returns: { type: '(uint64,uint64,uint64)' },
+    })
+    const appCall = algosdk.makeApplicationNoOpTxnFromObject({
+      sender: activeAddress,
+      appIndex: BigInt(appId),
+      appArgs: [
+        method.getSelector(),
+        encodeU64(removeLp),
+        encodeU64(Math.floor(removeQuote.a * 0.98)),
+        encodeU64(Math.floor(removeQuote.b * 0.98)),
+        encodeU64(Math.floor(removeQuote.c * 0.98)),
+      ],
+      foreignAssets: [assets[0].id, assets[1].id, assets[2].id],
+      suggestedParams: { ...sp, fee: 4_000n, flatFee: true },
+    })
+    const signed = await signTransactions([algosdk.encodeUnsignedTransaction(appCall)])
+    const signedGroup = signed.filter((stxn): stxn is Uint8Array => stxn !== null)
+    const { txid } = await algod.sendRawTransaction(signedGroup).do()
+    await algosdk.waitForConfirmation(algod, txid, 4)
+    setStatus(`Remove liquidity confirmed: ${txid}`)
+    await loadPool()
+    await loadLpBalance()
+  }
+
   async function fundConnectedWallet(assetId: number) {
     if (!activeAddress) throw new Error('Connect wallet first')
     if (!Number.isInteger(fundAmount) || fundAmount <= 0) throw new Error('Fund amount must be a positive integer')
@@ -412,6 +529,9 @@ export default function SwapPage() {
   useEffect(() => {
     loadWalletAssetOptIns().catch((e) => setStatus(e.message))
   }, [activeAddress])
+  useEffect(() => {
+    loadLpBalance().catch((e) => setStatus(e.message))
+  }, [activeAddress])
 
   useEffect(() => {
     if (assetInId === assetOutId) {
@@ -425,6 +545,7 @@ export default function SwapPage() {
   return (
     <main>
       <h1>Tri-Asset AMM (TestNet)</h1>
+      <p><Link href="/lp">Go to LP Management</Link></p>
       <p>Orbital-inspired geometric AMM</p>
       <p>Dynamic 3-asset coupling enabled</p>
       <p>Invariant: A² + B² + C²</p>
@@ -476,6 +597,39 @@ export default function SwapPage() {
             Wallet must opt in to pool ASAs before swapping. Missing IDs: {missingOptIns.map((asset) => asset.id).join(', ')}
           </div>
         )}
+      </div>
+
+      <div className="card">
+        <h3>LP</h3>
+        <p>Total LP Supply: {pool.totalLpSupply}</p>
+        <p>Your LP Shares: {lpBalance}</p>
+        <p>Geometric Liquidity L = sqrt(A²+B²+C²): {geometricL}</p>
+        <div className="grid">
+          <div>
+            <label>Add A</label>
+            <input type="number" min={1} value={addA} onChange={(e) => setAddA(Number(e.target.value))} />
+          </div>
+          <div>
+            <label>Add B</label>
+            <input type="number" min={1} value={addB} onChange={(e) => setAddB(Number(e.target.value))} />
+          </div>
+          <div>
+            <label>Add C</label>
+            <input type="number" min={1} value={addC} onChange={(e) => setAddC(Number(e.target.value))} />
+          </div>
+          <div>
+            <label>Burn LP</label>
+            <input type="number" min={1} value={removeLp} onChange={(e) => setRemoveLp(Number(e.target.value))} />
+          </div>
+        </div>
+        <p>LP Mint Estimate: <b>{addLpEstimate}</b></p>
+        <p>Deposit imbalance: {(addImbalanceBps / 100).toFixed(2)}% max-share, penalty: {addPenaltyBps} bps</p>
+        {addPenaltyBps >= 200 && <div className="warning">Imbalanced deposit detected. LP mint is mildly reduced.</div>}
+        <p>Withdraw estimate: A {removeQuote.a} / B {removeQuote.b} / C {removeQuote.c}</p>
+        <div className="grid">
+          <button onClick={() => addLiquidity().catch((e) => setStatus(e.message))}>Add Liquidity</button>
+          <button className="secondary" onClick={() => removeLiquidity().catch((e) => setStatus(e.message))}>Remove Liquidity</button>
+        </div>
       </div>
 
       <div className="card">

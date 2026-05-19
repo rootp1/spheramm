@@ -3,11 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "fund:testnet": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/fund-testnet.ts",
-    "create:asas": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/create-asas.ts",
-    "init:pool": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/init-pool.ts",
-    "swap:test": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/swap-test.ts",
-    "validate:e2e": "DOTENV_CONFIG_PATH=../.env ts-node --transpile-only -r dotenv/config src/validate-e2e.ts"
+    "fund:testnet": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/fund-testnet.ts",
+    "create:asas": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/create-asas.ts",
+    "init:pool": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/init-pool.ts",
+    "swap:test": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/swap-test.ts",
+    "lp:test": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/lp-test.ts",
+    "fee-growth:test": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/fee-growth-test.ts",
+    "validate:e2e": "DOTENV_CONFIG_PATH=../.env TS_NODE_TRANSPILE_ONLY=true node --loader ts-node/esm -r dotenv/config src/validate-e2e.ts"
   },
   "dependencies": {
     "@algorandfoundation/algokit-utils": "^9.0.0",

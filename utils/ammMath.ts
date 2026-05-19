@@ -68,6 +68,64 @@ export type OrbitalQuote = {
   newReserveThird: number
 }
 
+export function geometricLiquidityMetric(aN: number, bN: number, cN: number): number {
+  const a = toBigInt(aN)
+  const b = toBigInt(bN)
+  const c = toBigInt(cN)
+  return Number(sqrtFloor(invariant3(a, b, c)))
+}
+
+export function imbalanceBps(aN: number, bN: number, cN: number): number {
+  const a = toBigInt(aN)
+  const b = toBigInt(bN)
+  const c = toBigInt(cN)
+  const sum = a + b + c
+  if (sum <= 0n) return 0
+  const maxReserve = a > b ? (a > c ? a : c) : b > c ? b : c
+  return Number((maxReserve * SCALE_BPS) / sum)
+}
+
+export function depositPenaltyBps(depositImbalanceBps: number): number {
+  if (depositImbalanceBps <= 3600) return 0
+  if (depositImbalanceBps <= 4800) return Math.floor((depositImbalanceBps - 3600) / 12)
+  if (depositImbalanceBps >= 7500) return 650
+  return 100 + Math.floor(((depositImbalanceBps - 4800) * 550) / 2700)
+}
+
+export function quoteAddLiquidity(
+  reserveA: number,
+  reserveB: number,
+  reserveC: number,
+  totalLpSupply: number,
+  amountA: number,
+  amountB: number,
+  amountC: number,
+): { lpOut: number; lpRaw: number; penaltyBps: number; depositImbalanceBps: number } {
+  const poolValue = geometricLiquidityMetric(reserveA, reserveB, reserveC)
+  const depositValue = geometricLiquidityMetric(amountA, amountB, amountC)
+  if (poolValue <= 0 || depositValue <= 0) return { lpOut: 0, lpRaw: 0, penaltyBps: 0, depositImbalanceBps: 0 }
+  const lpRaw = totalLpSupply <= 0 ? depositValue : Math.floor((depositValue * totalLpSupply) / poolValue)
+  const depImb = imbalanceBps(amountA, amountB, amountC)
+  const penalty = depositPenaltyBps(depImb)
+  const lpOut = Math.floor((lpRaw * (10_000 - penalty)) / 10_000)
+  return { lpOut, lpRaw, penaltyBps: penalty, depositImbalanceBps: depImb }
+}
+
+export function quoteRemoveLiquidity(
+  reserveA: number,
+  reserveB: number,
+  reserveC: number,
+  totalLpSupply: number,
+  lpAmount: number,
+): { amountAOut: number; amountBOut: number; amountCOut: number } {
+  if (totalLpSupply <= 0 || lpAmount <= 0) return { amountAOut: 0, amountBOut: 0, amountCOut: 0 }
+  return {
+    amountAOut: Math.floor((reserveA * lpAmount) / totalLpSupply),
+    amountBOut: Math.floor((reserveB * lpAmount) / totalLpSupply),
+    amountCOut: Math.floor((reserveC * lpAmount) / totalLpSupply),
+  }
+}
+
 export function quoteOrbitalExactIn(reserveInN: number, reserveOutN: number, reserveThirdN: number, amountInN: number): OrbitalQuote {
   const reserveIn = toBigInt(reserveInN)
   const reserveOut = toBigInt(reserveOutN)
