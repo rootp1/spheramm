@@ -23,6 +23,14 @@ class MarketConfig:
   geometric_edge_curvature_bps: int = 1400
   geometric_coupling_divisor: int = 40
   geometric_imbalance_limit_bps: int = 6400
+  equilibrium_amplification_bps: int = 2200
+  tail_guard_bps: int = 2800
+  stress_memory_decay_bps: int = 9300
+  coupling_field_gain_bps: int = 2600
+  tension_soft_threshold_bps: int = 2800
+  tension_hard_threshold_bps: int = 5200
+  center_fee_floor_bps: int = 8
+  stress_fee_ceiling_bps: int = 130
   regime: RegimeName = "random_market"
 
 
@@ -51,4 +59,3 @@ class AgentConfig:
   basket_intensity: float = 0.35
   basket_rotation_size: int = 8000
   basket_triangular_bias: float = 0.7
-

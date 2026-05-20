@@ -286,6 +286,47 @@ python3 simulations/run_simulation.py
 python3 simulations/sweep.py
 ```
 
+## Advanced Regime Research
+
+Use the advanced multi-agent framework to discover specialization domains instead of a single global winner:
+
+```bash
+python3 -m simulations.advanced.run_advanced --regime correlated_basket --steps 2000 --seed 42
+python3 -m simulations.advanced.sweep_advanced
+python3 -m simulations.advanced.analyze_sweep
+```
+
+This framework adds:
+- retail / arbitrage / whale / LP allocator / basket trader agents
+- explicit market regimes (random, correlated, divergent, fragmentation, crisis)
+- reserve tension + stress-memory diagnostics
+- interactive regime dashboards and sweep heatmaps
+
+## Orbital Localized Liquidity (Research Stage)
+
+Global geometric liquidity struggled because all capital was spread across the full reserve manifold, which increased tail slippage and reduced local execution depth.
+
+The localized upgrade introduces multidimensional reserve-space regions (not 1D price ticks):
+
+- balanced core region: dense, soft, low-fee liquidity
+- mid region: moderate liquidity and curvature
+- edge region: defensive, higher-fee, stronger-protection liquidity
+
+Unlike Uniswap v3 price ticks, these regions are activated by 3-asset reserve geometry (`A,B,C`) and imbalance proximity, not a single pair price interval.
+
+Research framework:
+
+```bash
+python3 -m simulations.advanced.run_advanced --regime correlated_basket --steps 2000 --seed 42
+python3 -m simulations.advanced.sweep_advanced
+python3 -m simulations.advanced.analyze_sweep
+python3 -m simulations.advanced.final_report
+```
+
+Experimental contract architecture for localized geometric regions is provided at:
+
+- [`contracts/experimental/tri_asset_amm_orbital_ticks.algo.ts`](/home/rootp1/rootp1s_repositories/spheramm/contracts/experimental/tri_asset_amm_orbital_ticks.algo.ts)
+
 ## Demo Flow Checklist
 
 1. Deploy contract

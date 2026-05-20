@@ -11,6 +11,7 @@ Run full regime sweep:
 ```bash
 python3 -m simulations.advanced.sweep_advanced
 python3 -m simulations.advanced.analyze_sweep
+python3 -m simulations.advanced.final_report
 ```
 
 ## Regimes
@@ -50,3 +51,9 @@ Use `advanced_sweep_results.csv` + `top_regime_specialists.csv` to identify:
 - favorable regimes
 - failure regimes
 - specialization domains for geometric liquidity
+
+## Systems compared
+
+- Pairwise baseline
+- Global geometric AMM
+- Localized geometric AMM (orbital regions)

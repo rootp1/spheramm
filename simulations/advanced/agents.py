@@ -4,7 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from .amm import ASSETS, PAIRS, GeometricAMM, PairwiseAMM, Trade, dominance_bps
+from .amm import ASSETS, PAIRS, GeometricAMM, LocalizedGeometricAMM, PairwiseAMM, Trade, dominance_bps
 from .config import AgentConfig, MarketConfig
 from .regimes import preferred_direction
 
@@ -37,6 +37,7 @@ def retail_flow(
   oracle_now: Dict[str, float],
   pair: PairwiseAMM,
   geo: GeometricAMM,
+  lgeo: LocalizedGeometricAMM,
   acfg: AgentConfig,
   mcfg: MarketConfig,
 ) -> List[AgentEvent]:
@@ -52,8 +53,10 @@ def retail_flow(
   px = _pair_px(oracle_now, ain, aout)
   p = pair.trade(ain, aout, amount, px)
   g = geo.trade(ain, aout, amount, px)
+  lg = lgeo.trade(ain, aout, amount, px)
   out.append(_event(step, "retail", "pairwise", ain, aout, amount, p))
   out.append(_event(step, "retail", "geometric", ain, aout, amount, g))
+  out.append(_event(step, "retail", "localized_geometric", ain, aout, amount, lg))
   return out
 
 
@@ -63,6 +66,7 @@ def arbitrage_flow(
   oracle_now: Dict[str, float],
   pair: PairwiseAMM,
   geo: GeometricAMM,
+  lgeo: LocalizedGeometricAMM,
   acfg: AgentConfig,
 ) -> List[AgentEvent]:
   events: List[AgentEvent] = []
@@ -72,8 +76,10 @@ def arbitrage_flow(
     opx = _pair_px(oracle_now, ain, aout)
     ppx = pair.spot(ain, aout)
     gpx = geo.spot(ain, aout)
+    lgpx = lgeo.spot(ain, aout)
     pdev = abs(ppx - opx) / max(1e-9, opx) * 10_000
     gdev = abs(gpx - opx) / max(1e-9, opx) * 10_000
+    lgdev = abs(lgpx - opx) / max(1e-9, opx) * 10_000
     if pdev > acfg.arb_threshold_bps:
       d_in, d_out = (ain, aout) if ppx > opx else (aout, ain)
       amt = max(1, int(acfg.arb_capital_per_trade * acfg.arb_aggressiveness))
@@ -92,6 +98,15 @@ def arbitrage_flow(
       if r.ok:
         ev.pnl_value = r.amount_out * oracle_now[d_out] - amt * oracle_now[d_in]
       events.append(ev)
+    if lgdev > acfg.arb_threshold_bps:
+      d_in, d_out = (ain, aout) if lgpx > opx else (aout, ain)
+      amt = max(1, int(acfg.arb_capital_per_trade * acfg.arb_aggressiveness))
+      px = _pair_px(oracle_now, d_in, d_out)
+      r = lgeo.trade(d_in, d_out, amt, px)
+      ev = _event(step, "arbitrage", "localized_geometric", d_in, d_out, amt, r)
+      if r.ok:
+        ev.pnl_value = r.amount_out * oracle_now[d_out] - amt * oracle_now[d_in]
+      events.append(ev)
   return events
 
 
@@ -102,6 +117,7 @@ def whale_stress_flow(
   oracle_now: Dict[str, float],
   pair: PairwiseAMM,
   geo: GeometricAMM,
+  lgeo: LocalizedGeometricAMM,
   acfg: AgentConfig,
   mcfg: MarketConfig,
 ) -> List[AgentEvent]:
@@ -115,8 +131,10 @@ def whale_stress_flow(
   px = _pair_px(oracle_now, ain, aout)
   p = pair.trade(ain, aout, amt, px)
   g = geo.trade(ain, aout, amt, px)
+  lg = lgeo.trade(ain, aout, amt, px)
   events.append(_event(step, "whale", "pairwise", ain, aout, amt, p))
   events.append(_event(step, "whale", "geometric", ain, aout, amt, g))
+  events.append(_event(step, "whale", "localized_geometric", ain, aout, amt, lg))
   return events
 
 
@@ -126,6 +144,7 @@ def basket_trader_flow(
   oracle_now: Dict[str, float],
   pair: PairwiseAMM,
   geo: GeometricAMM,
+  lgeo: LocalizedGeometricAMM,
   acfg: AgentConfig,
   mcfg: MarketConfig,
 ) -> List[AgentEvent]:
@@ -142,9 +161,11 @@ def basket_trader_flow(
     px = _pair_px(oracle_now, ain, aout)
     p = pair.trade(ain, aout, current_amt_pair, px)
     g = geo.trade(ain, aout, current_amt_geo, px)
+    lg = lgeo.trade(ain, aout, current_amt_geo, px)
     events.append(_event(step, "basket", "pairwise", ain, aout, current_amt_pair, p, hop_count=hop))
     events.append(_event(step, "basket", "geometric", ain, aout, current_amt_geo, g, hop_count=hop))
-    if not p.ok or not g.ok:
+    events.append(_event(step, "basket", "localized_geometric", ain, aout, current_amt_geo, lg, hop_count=hop))
+    if not p.ok or not g.ok or not lg.ok:
       break
     current_amt_pair = max(1, p.amount_out)
     current_amt_geo = max(1, g.amount_out)
@@ -157,6 +178,7 @@ def lp_allocation_flow(
   oracle_now: Dict[str, float],
   pair: PairwiseAMM,
   geo: GeometricAMM,
+  lgeo: LocalizedGeometricAMM,
   acfg: AgentConfig,
   state: Dict[str, float],
 ) -> List[AgentEvent]:
@@ -165,13 +187,18 @@ def lp_allocation_flow(
     return events
   pair_tvl = pair.tvl(oracle_now)
   geo_tvl = geo.tvl(oracle_now)
+  lgeo_tvl = lgeo.tvl(oracle_now)
   pair_dom = dominance_bps(**_abc(pair.reserves_total()))
   geo_dom = dominance_bps(**_abc(geo.reserves_total()))
+  lgeo_dom = dominance_bps(**_abc(lgeo.reserves_total()))
   # Simple migration policy: favor higher adjusted yield = fee proxy - dominance stress.
   pair_score = state.get("pair_fee_proxy", 0.0) - acfg.lp_migration_sensitivity * (pair_dom / 10_000)
   geo_score = state.get("geo_fee_proxy", 0.0) - acfg.lp_migration_sensitivity * (geo_dom / 10_000)
-  target_geo_weight = 0.5 + max(-0.35, min(0.35, (geo_score - pair_score)))
-  state["lp_geo_weight"] = max(0.05, min(0.95, target_geo_weight))
+  lgeo_score = state.get("lgeo_fee_proxy", 0.0) - acfg.lp_migration_sensitivity * (lgeo_dom / 10_000)
+  target_geo_weight = 0.33 + max(-0.25, min(0.25, (geo_score - pair_score)))
+  target_lgeo_weight = 0.33 + max(-0.25, min(0.25, (lgeo_score - pair_score)))
+  state["lp_geo_weight"] = max(0.02, min(0.96, target_geo_weight))
+  state["lp_lgeo_weight"] = max(0.02, min(0.96, target_lgeo_weight))
   # Log as synthetic event.
   events.append(
     AgentEvent(
@@ -187,6 +214,23 @@ def lp_allocation_flow(
       execution_quality=0.0,
       ok=1,
       pnl_value=state["lp_geo_weight"],
+      hop_count=0,
+    )
+  )
+  events.append(
+    AgentEvent(
+      step=step,
+      agent="lp_allocator",
+      system="meta_localized",
+      ain="A",
+      aout="B",
+      amount_in=0,
+      amount_out=0,
+      slippage_pct=0.0,
+      fee_bps=0,
+      execution_quality=0.0,
+      ok=1,
+      pnl_value=state["lp_lgeo_weight"],
       hop_count=0,
     )
   )
@@ -212,4 +256,3 @@ def _event(step: int, agent: str, system: str, ain: str, aout: str, amt: int, r:
 
 def _abc(reserves: Dict[str, int]) -> Dict[str, int]:
   return {"a": reserves["A"], "b": reserves["B"], "c": reserves["C"]}
-
