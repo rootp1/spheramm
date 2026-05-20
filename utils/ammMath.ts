@@ -39,22 +39,41 @@ function dominanceBps(a: bigint, b: bigint, c: bigint, k: bigint): bigint {
   return (maxSq * SCALE_BPS) / k
 }
 
-function dynamicFeeBps(a: bigint, b: bigint, c: bigint): bigint {
-  const k = invariant3(a, b, c)
-  const dom = dominanceBps(a, b, c, k)
-  if (dom <= 3_400n) return 30n
-  if (dom >= 6_400n) return 100n
-  return 30n + ((dom - 3_400n) * 70n) / 3_000n
+function dynamicFeeBpsFromDom(dom: bigint): bigint {
+  if (dom <= 3_300n) return 18n
+  if (dom <= 4_900n) return 18n + ((dom - 3_300n) * 32n) / 1_600n
+  if (dom <= 6_200n) return 50n + ((dom - 4_900n) * 40n) / 1_300n
+  return 90n
 }
 
 function couplingAdjustment(reserveIn: bigint, reserveThird: bigint, amountInAfterFee: bigint, domBps: bigint): bigint {
-  const denom = reserveIn * 20n
+  const denom = reserveIn * 40n
   let base = (reserveThird * amountInAfterFee) / denom
   if (base <= 0n) base = 1n
-  let weighted = (base * (10_000n + domBps)) / SCALE_BPS
+  const tradeSizeBps = (amountInAfterFee * SCALE_BPS) / reserveIn
+  const sizePressure = sqrtFloor(tradeSizeBps * SCALE_BPS)
+  const imbalancePressure = domBps > 3_600n ? domBps - 3_600n : 0n
+  let weighted = (base * (2_500n + sizePressure + imbalancePressure)) / SCALE_BPS
   if (weighted <= 0n) weighted = 1n
   const maxAdjust = reserveThird - 1n
   return weighted > maxAdjust ? maxAdjust : weighted
+}
+
+function curvatureBps(dom: bigint): bigint {
+  if (dom <= 3_400n) return 4_200n
+  if (dom >= 6_200n) return 1_400n
+  return 4_200n - ((dom - 3_400n) * 2_800n) / 2_800n
+}
+
+function effectiveReserve(x: bigint, curvBps: bigint): bigint {
+  return x + (sqrtFloor(x) * curvBps) / SCALE_BPS
+}
+
+function inverseEffectiveReserve(eff: bigint, curvBps: bigint): bigint {
+  const reduction = (sqrtFloor(eff) * curvBps) / SCALE_BPS
+  if (reduction >= eff) return 1n
+  const v = eff - reduction
+  return v <= 0n ? 1n : v
 }
 
 export type OrbitalQuote = {
@@ -72,7 +91,11 @@ export function geometricLiquidityMetric(aN: number, bN: number, cN: number): nu
   const a = toBigInt(aN)
   const b = toBigInt(bN)
   const c = toBigInt(cN)
-  return Number(sqrtFloor(invariant3(a, b, c)))
+  const rawK = invariant3(a, b, c)
+  const dom = dominanceBps(a, b, c, rawK)
+  const curv = curvatureBps(dom)
+  const k = safeSquare(effectiveReserve(a, curv)) + safeSquare(effectiveReserve(b, curv)) + safeSquare(effectiveReserve(c, curv))
+  return Number(sqrtFloor(k))
 }
 
 export function imbalanceBps(aN: number, bN: number, cN: number): number {
@@ -142,13 +165,13 @@ export function quoteOrbitalExactIn(reserveInN: number, reserveOutN: number, res
     return { amountOut: 0, feeBps: 0, dominanceBps: 0, imbalanceRatio: 0, couplingAdjustment: 0, newReserveIn: Number(reserveIn), newReserveOut: Number(reserveOut), newReserveThird: Number(reserveThird) }
   }
 
-  const k = invariant3(reserveIn, reserveOut, reserveThird)
-  const dom = dominanceBps(reserveIn, reserveOut, reserveThird, k)
+  const rawK = invariant3(reserveIn, reserveOut, reserveThird)
+  const dom = dominanceBps(reserveIn, reserveOut, reserveThird, rawK)
   if (dom > 6_400n) {
-    return { amountOut: 0, feeBps: Number(dynamicFeeBps(reserveIn, reserveOut, reserveThird)), dominanceBps: Number(dom), imbalanceRatio: Number(dom) / 10_000, couplingAdjustment: 0, newReserveIn: Number(reserveIn), newReserveOut: Number(reserveOut), newReserveThird: Number(reserveThird) }
+    return { amountOut: 0, feeBps: Number(dynamicFeeBpsFromDom(dom)), dominanceBps: Number(dom), imbalanceRatio: Number(dom) / 10_000, couplingAdjustment: 0, newReserveIn: Number(reserveIn), newReserveOut: Number(reserveOut), newReserveThird: Number(reserveThird) }
   }
 
-  const feeBps = dynamicFeeBps(reserveIn, reserveOut, reserveThird)
+  const feeBps = dynamicFeeBpsFromDom(dom)
   const amountInAfterFee = (amountIn * (SCALE_BPS - feeBps)) / SCALE_BPS
   if (amountInAfterFee <= 0n) {
     return { amountOut: 0, feeBps: Number(feeBps), dominanceBps: Number(dom), imbalanceRatio: Number(dom) / 10_000, couplingAdjustment: 0, newReserveIn: Number(reserveIn), newReserveOut: Number(reserveOut), newReserveThird: Number(reserveThird) }
@@ -157,9 +180,11 @@ export function quoteOrbitalExactIn(reserveInN: number, reserveOutN: number, res
   const newReserveIn = reserveIn + amountInAfterFee
   const deltaThird = couplingAdjustment(reserveIn, reserveThird, amountInAfterFee, dom)
   const newReserveThird = safeSub(reserveThird, deltaThird)
-
-  const targetOutSq = safeSub(safeSub(k, safeSquare(newReserveIn)), safeSquare(newReserveThird))
-  const newReserveOut = sqrtFloor(targetOutSq)
+  const curv = curvatureBps(dom)
+  const k = safeSquare(effectiveReserve(reserveIn, curv)) + safeSquare(effectiveReserve(reserveOut, curv)) + safeSquare(effectiveReserve(reserveThird, curv))
+  const targetOutSq = safeSub(safeSub(k, safeSquare(effectiveReserve(newReserveIn, curv))), safeSquare(effectiveReserve(newReserveThird, curv)))
+  const targetOutEff = sqrtFloor(targetOutSq)
+  const newReserveOut = inverseEffectiveReserve(targetOutEff, curv)
   if (newReserveOut > reserveOut) {
     return { amountOut: 0, feeBps: Number(feeBps), dominanceBps: Number(dom), imbalanceRatio: Number(dom) / 10_000, couplingAdjustment: Number(deltaThird), newReserveIn: Number(newReserveIn), newReserveOut: Number(newReserveOut), newReserveThird: Number(newReserveThird) }
   }

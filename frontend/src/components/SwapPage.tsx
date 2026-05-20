@@ -52,27 +52,22 @@ function quoteLocalDetailed(reserveInN: number, reserveOutN: number, reserveThir
   if (reserveIn < 20n || amountIn > reserveIn / 20n) return result
 
   const sq = (x: bigint) => x * x
-  const inv = sq(reserveIn) + sq(reserveOut) + sq(reserveThird)
+  const invRaw = sq(reserveIn) + sq(reserveOut) + sq(reserveThird)
   const maxSq = [sq(reserveIn), sq(reserveOut), sq(reserveThird)].reduce((a, b) => (a > b ? a : b), 0n)
-  const dom = Number((maxSq * scale) / inv)
+  const dom = Number((maxSq * scale) / invRaw)
   if (dom > 6400) return result
 
-  let fee = 30
-  if (dom > 3400) fee = Math.min(100, 30 + Math.floor(((dom - 3400) * 70) / 3000))
+  let fee = 18
+  if (dom > 3300 && dom <= 4900) fee = 18 + Math.floor(((dom - 3300) * 32) / 1600)
+  else if (dom > 4900 && dom <= 6200) fee = 50 + Math.floor(((dom - 4900) * 40) / 1300)
+  else if (dom > 6200) fee = 90
   const amountInAfterFee = (amountIn * BigInt(10_000 - fee)) / scale
   if (amountInAfterFee <= 0n) return result
 
   const newReserveIn = reserveIn + amountInAfterFee
-  let base = (reserveThird * amountInAfterFee) / (reserveIn * 20n)
+  let base = (reserveThird * amountInAfterFee) / (reserveIn * 40n)
   if (base <= 0n) base = 1n
-  let deltaThird = (base * (10_000n + BigInt(dom))) / scale
-  if (deltaThird <= 0n) deltaThird = 1n
-  if (deltaThird >= reserveThird) deltaThird = reserveThird - 1n
-  const newReserveThird = reserveThird - deltaThird
-
-  const targetOutSq = inv - sq(newReserveIn) - sq(newReserveThird)
-  if (targetOutSq <= 0n) return result
-
+  const tradeSizeBps = (amountInAfterFee * 10_000n) / reserveIn
   const sqrtFloor = (n: bigint) => {
     if (n < 2n) return n
     let x0 = n
@@ -83,7 +78,22 @@ function quoteLocalDetailed(reserveInN: number, reserveOutN: number, reserveThir
     }
     return x0
   }
-  const newReserveOut = sqrtFloor(targetOutSq)
+  const sizePressure = sqrtFloor(tradeSizeBps * 10_000n)
+  const imbalancePressure = dom > 3600 ? BigInt(dom - 3600) : 0n
+  let deltaThird = (base * (2500n + sizePressure + imbalancePressure)) / scale
+  if (deltaThird <= 0n) deltaThird = 1n
+  if (deltaThird >= reserveThird) deltaThird = reserveThird - 1n
+  const newReserveThird = reserveThird - deltaThird
+
+  const curv = dom <= 3400 ? 4200n : dom >= 6200 ? 1400n : 4200n - BigInt(dom - 3400)
+  const eff = (x: bigint) => x + (sqrtFloor(x) * curv) / 10000n
+  const inv = sq(eff(reserveIn)) + sq(eff(reserveOut)) + sq(eff(reserveThird))
+  const targetOutSq = inv - sq(eff(newReserveIn)) - sq(eff(newReserveThird))
+  if (targetOutSq <= 0n) return result
+
+  const targetOutEff = sqrtFloor(targetOutSq)
+  const red = (sqrtFloor(targetOutEff) * curv) / 10000n
+  const newReserveOut = red >= targetOutEff ? 1n : targetOutEff - red
   if (newReserveOut > reserveOut) return result
 
   return {

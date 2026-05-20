@@ -252,6 +252,40 @@ These log:
 - deposit/withdraw outcomes
 - value-per-LP growth signal after swaps
 
+## Geometric Efficiency Upgrade (v2)
+
+The initial pure sphere formulation (`A^2 + B^2 + C^2`) was useful for proving multidimensional coupling, but it was too economically rigid in stress tests:
+
+- excessive slippage from steep curvature
+- over-reactive third-reserve movement
+- weaker LP growth vs pairwise baseline
+
+This upgrade keeps unified 3-asset geometry but improves market behavior:
+
+- softened generalized-geometry proxy:
+  - invariant uses transformed reserves:
+  - `effective(x) = x + (curvatureBps * sqrt(x))/10000`
+  - and solves against `effective(A)^2 + effective(B)^2 + effective(C)^2`
+- adaptive curvature regions:
+  - balanced pool => softer center geometry
+  - stressed pool => stronger edge protection
+- adaptive damped coupling:
+  - weaker for balanced/small swaps
+  - stronger for imbalanced/larger swaps
+  - nonlinear pressure from trade-size and dominance
+- equilibrium-attraction fee profile:
+  - lower fees near equilibrium
+  - escalates only under imbalance stress
+
+All logic remains deterministic, integer-only, and AVM-safe.
+
+For off-chain quantitative tuning and comparison, use:
+
+```bash
+python3 simulations/run_simulation.py
+python3 simulations/sweep.py
+```
+
 ## Demo Flow Checklist
 
 1. Deploy contract

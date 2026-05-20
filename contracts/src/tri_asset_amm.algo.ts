@@ -146,8 +146,8 @@ export class TriAssetAmm extends Contract {
     const newReserveA = this.safeSub(this.reserveA.value, amountAOut)
     const newReserveB = this.safeSub(this.reserveB.value, amountBOut)
     const newReserveC = this.safeSub(this.reserveC.value, amountCOut)
-    const kAfter = this.invariant(newReserveA, newReserveB, newReserveC)
-    this.validatePoolHealth(newReserveA, newReserveB, newReserveC, kAfter)
+    const rawKAfter = this.rawInvariant(newReserveA, newReserveB, newReserveC)
+    this.validatePoolHealth(newReserveA, newReserveB, newReserveC, rawKAfter)
 
     this.reserveA.value = newReserveA
     this.reserveB.value = newReserveB
@@ -326,30 +326,35 @@ export class TriAssetAmm extends Contract {
     assert(reserveIn >= 20, 'reserve too small for max swap')
     assert(amountIn <= reserveIn / 20, 'swap exceeds max trade size')
 
-    const kBefore = this.invariant(reserveIn, reserveOut, reserveThird)
-    this.validatePoolHealth(reserveIn, reserveOut, reserveThird, kBefore)
-    const feeBps = this.computeDynamicFee(reserveIn, reserveOut, reserveThird, kBefore)
+    const rawKBefore = this.rawInvariant(reserveIn, reserveOut, reserveThird)
+    this.validatePoolHealth(reserveIn, reserveOut, reserveThird, rawKBefore)
+    const dominanceBps = this.computeDominanceBps(reserveIn, reserveOut, reserveThird, rawKBefore)
+    const curvatureBps = this.computeCurvatureBps(dominanceBps)
+    const kBefore = this.invariant(reserveIn, reserveOut, reserveThird, curvatureBps)
+    const feeBps = this.computeDynamicFee(dominanceBps)
     const amountInAfterFee = this.applyFee(amountIn, feeBps)
     assert(amountInAfterFee > 0, 'amountIn too small after fee')
     const newReserveIn: uint64 = reserveIn + amountInAfterFee
     assert(newReserveIn >= reserveIn, 'reserve overflow')
     assert(newReserveIn <= 100_000_000, 'reserve cap exceeded')
 
-    const dominanceBps = this.computeDominanceBps(reserveIn, reserveOut, reserveThird, kBefore)
     const couplingAdjustment = this.computeCouplingAdjustment(reserveIn, reserveThird, amountInAfterFee, dominanceBps)
     const newReserveThird = this.safeSub(reserveThird, couplingAdjustment)
     assert(newReserveThird > 0, 'third reserve depleted')
     assert(newReserveThird <= 100_000_000, 'reserve cap exceeded')
 
-    const newReserveInSq = this.safeSquare(newReserveIn)
-    const newReserveThirdSq = this.safeSquare(newReserveThird)
+    const newEffIn = this.effectiveReserve(newReserveIn, curvatureBps)
+    const newEffThird = this.effectiveReserve(newReserveThird, curvatureBps)
+    const newEffInSq = this.safeSquare(newEffIn)
+    const newEffThirdSq = this.safeSquare(newEffThird)
 
-    assert(kBefore >= newReserveInSq, 'invariant exhausted by input')
-    const remainingAfterInput: uint64 = this.safeSub(kBefore, newReserveInSq)
-    assert(remainingAfterInput >= newReserveThirdSq, 'invariant exhausted by third reserve')
+    assert(kBefore >= newEffInSq, 'invariant exhausted by input')
+    const remainingAfterInput: uint64 = this.safeSub(kBefore, newEffInSq)
+    assert(remainingAfterInput >= newEffThirdSq, 'invariant exhausted by third reserve')
 
-    const targetOutSq: uint64 = this.safeSub(remainingAfterInput, newReserveThirdSq)
-    const newReserveOut: uint64 = this.safeSqrt(targetOutSq)
+    const targetOutSq: uint64 = this.safeSub(remainingAfterInput, newEffThirdSq)
+    const targetOutEff: uint64 = this.safeSqrt(targetOutSq)
+    const newReserveOut: uint64 = this.inverseEffectiveReserve(targetOutEff, curvatureBps)
 
     assert(reserveOut >= newReserveOut, 'invalid output reserve')
     const amountOut: uint64 = this.safeSub(reserveOut, newReserveOut)
@@ -357,26 +362,45 @@ export class TriAssetAmm extends Contract {
     assert(amountOut < reserveOut, 'output would drain reserve')
     assert(newReserveOut <= 100_000_000, 'reserve cap exceeded')
 
-    const kAfter = this.invariant(newReserveIn, newReserveOut, newReserveThird)
-    this.validatePoolHealth(newReserveIn, newReserveOut, newReserveThird, kAfter)
+    const rawKAfter = this.rawInvariant(newReserveIn, newReserveOut, newReserveThird)
+    this.validatePoolHealth(newReserveIn, newReserveOut, newReserveThird, rawKAfter)
     return [amountOut, newReserveIn, newReserveOut, newReserveThird]
   }
 
-  private invariant(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
+  private rawInvariant(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
     const reserveASq = this.safeSquare(reserveA)
     const reserveBSq = this.safeSquare(reserveB)
     const reserveCSq = this.safeSquare(reserveC)
 
     const sumAB: uint64 = reserveASq + reserveBSq
-    assert(sumAB >= reserveASq, 'invariant overflow')
+    assert(sumAB >= reserveASq, 'raw invariant overflow')
     const sumABC: uint64 = sumAB + reserveCSq
+    assert(sumABC >= sumAB, 'raw invariant overflow')
+    return sumABC
+  }
+
+  private invariant(reserveA: uint64, reserveB: uint64, reserveC: uint64, curvatureBps: uint64): uint64 {
+    const effA = this.effectiveReserve(reserveA, curvatureBps)
+    const effB = this.effectiveReserve(reserveB, curvatureBps)
+    const effC = this.effectiveReserve(reserveC, curvatureBps)
+
+    const effASq = this.safeSquare(effA)
+    const effBSq = this.safeSquare(effB)
+    const effCSq = this.safeSquare(effC)
+
+    const sumAB: uint64 = effASq + effBSq
+    assert(sumAB >= effASq, 'invariant overflow')
+    const sumABC: uint64 = sumAB + effCSq
     assert(sumABC >= sumAB, 'invariant overflow')
 
     return sumABC
   }
 
   private geometricLiquidity(reserveA: uint64, reserveB: uint64, reserveC: uint64): uint64 {
-    const k = this.invariant(reserveA, reserveB, reserveC)
+    const rawK = this.rawInvariant(reserveA, reserveB, reserveC)
+    const dom = this.computeDominanceBps(reserveA, reserveB, reserveC, rawK)
+    const curv = this.computeCurvatureBps(dom)
+    const k = this.invariant(reserveA, reserveB, reserveC, curv)
     return this.safeSqrt(k)
   }
 
@@ -428,12 +452,37 @@ export class TriAssetAmm extends Contract {
     return 100 + ((depositImbalanceBps - 4_800) * 550) / 2_700
   }
 
-  private computeDynamicFee(reserveA: uint64, reserveB: uint64, reserveC: uint64, kValue: uint64): uint64 {
-    const dominanceBps = this.computeDominanceBps(reserveA, reserveB, reserveC, kValue)
-    if (dominanceBps <= 3_400) return 30
-    if (dominanceBps >= 6_400) return 100
-    const excess: uint64 = dominanceBps - 3_400
-    return 30 + (excess * 70) / 3_000
+  private computeDynamicFee(dominanceBps: uint64): uint64 {
+    // Equilibrium attraction: lower fees near balance, higher fees only under stress.
+    if (dominanceBps <= 3_300) return 18
+    if (dominanceBps <= 4_900) return 18 + ((dominanceBps - 3_300) * 32) / 1_600
+    if (dominanceBps <= 6_200) return 50 + ((dominanceBps - 4_900) * 40) / 1_300
+    return 90
+  }
+
+  private computeCurvatureBps(dominanceBps: uint64): uint64 {
+    // Region-aware softened geometry proxy:
+    // high bps => softer center behavior, low bps => stronger edge protection.
+    if (dominanceBps <= 3_400) return 4_200
+    if (dominanceBps >= 6_200) return 1_400
+    return 4_200 - ((dominanceBps - 3_400) * 2_800) / 2_800
+  }
+
+  private effectiveReserve(reserve: uint64, curvatureBps: uint64): uint64 {
+    const sqrtR = this.safeSqrt(reserve)
+    const boost: uint64 = (sqrtR * curvatureBps) / 10_000
+    const eff: uint64 = reserve + boost
+    assert(eff >= reserve, 'effective reserve overflow')
+    return eff
+  }
+
+  private inverseEffectiveReserve(effective: uint64, curvatureBps: uint64): uint64 {
+    const sqrtEff = this.safeSqrt(effective)
+    const reduction: uint64 = (sqrtEff * curvatureBps) / 10_000
+    if (reduction >= effective) return 1
+    const raw: uint64 = effective - reduction
+    if (raw === 0) return 1
+    return raw
   }
 
   private computeCouplingAdjustment(
@@ -444,12 +493,17 @@ export class TriAssetAmm extends Contract {
   ): uint64 {
     assert(reserveIn > 0, 'reserveIn zero')
     assert(reserveThird > 1, 'third reserve too small')
-    const denom: uint64 = reserveIn * 20
+    const denom: uint64 = reserveIn * 40
     assert(denom > reserveIn, 'denominator overflow')
     let base: uint64 = (reserveThird * amountInAfterFee) / denom
     if (base === 0) base = 1
 
-    let weighted: uint64 = (base * (10_000 + dominanceBps)) / 10_000
+    const tradeSizeBps: uint64 = (amountInAfterFee * 10_000) / reserveIn
+    const sizePressure: uint64 = this.safeSqrt(tradeSizeBps * 10_000)
+    let imbalancePressure: uint64 = 0
+    if (dominanceBps > 3_600) imbalancePressure = dominanceBps - 3_600
+
+    let weighted: uint64 = (base * (2_500 + sizePressure + imbalancePressure)) / 10_000
     if (weighted === 0) weighted = 1
 
     const maxAdjust: uint64 = reserveThird - 1
